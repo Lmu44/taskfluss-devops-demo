@@ -16,6 +16,11 @@ RUN npm install --omit=dev
 # ---- Stufe 3: "release" ----------------------------------------------------
 # Das eigentliche, schlanke Produktions-Image.
 FROM base AS release
+# npm wird nur zum Installieren gebraucht (Stufe 2), nicht zur Laufzeit.
+# Das im Basis-Image mitgelieferte npm bringt eigene Abhaengigkeiten mit,
+# in denen Trivy HIGH-Schwachstellen findet. Entfernen verkleinert die
+# Angriffsflaeche, ohne die Anwendung zu beeintraechtigen.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 COPY --from=dependencies /usr/src/app/node_modules ./node_modules
 COPY package.json ./
 COPY index.js ./
