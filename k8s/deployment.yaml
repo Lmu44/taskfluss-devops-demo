@@ -1,0 +1,42 @@
+# Dieses Manifest beschreibt, WIE die TaskFluss-Demo in Kubernetes
+# laufen soll: welches Docker-Image, wie viele Kopien (Replicas),
+# und wie Kubernetes pruefen soll, ob eine Kopie gesund ist.
+#
+# "IMAGE_PLACEHOLDER" wird von der Pipeline (ci-cd.yml) automatisch
+# durch das echte, gerade gebaute Image ersetzt - siehe den Schritt
+# "Nach Staging/Produktion deployen" im Workflow.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskfluss-demo
+  labels:
+    app: taskfluss-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: taskfluss-demo
+  template:
+    metadata:
+      labels:
+        app: taskfluss-demo
+    spec:
+      containers:
+        - name: taskfluss-demo
+          image: IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

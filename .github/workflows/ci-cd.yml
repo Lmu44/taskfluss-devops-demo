@@ -1,0 +1,206 @@
+name: CI/CD Pipeline
+
+# Wann soll dieser Workflow laufen?
+# 1) Bei jedem Pull Request auf main -> nur Tests + Codequalitaet (Job: test)
+# 2) Bei jedem Push/Merge auf main   -> zusaetzlich bauen, scannen, deployen
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Minimale Rechte fuer das automatische GITHUB_TOKEN.
+# Nur der Build-Job darf zusaetzlich Images in die Registry schreiben.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # JOB 1: Laeuft IMMER (bei Pull Request und bei Push auf main).
+  # Der Name "Tests und Codequalitaet" wird im Branch-Schutz von main
+  # als erforderliche Statuspruefung eingetragen (ANLEITUNG, Schritt 6).
+  # ---------------------------------------------------------------------
+  test:
+    name: Tests und Codequalitaet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken (volle Historie fuer die Analyse)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Node.js einrichten
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Abhaengigkeiten installieren
+        run: npm install
+
+      - name: Unit-Tests ausfuehren (Mocha)
+        run: npm test
+
+      # Laesst den Job scheitern, wenn das Quality Gate verfehlt wird
+      # (sonar.qualitygate.wait=true). Ohne diesen Parameter wuerde die
+      # Analyse nur hochgeladen und der Job bliebe immer gruen.
+      - name: SonarQube-Cloud-Analyse mit Quality Gate
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+
+  # ---------------------------------------------------------------------
+  # JOB 2: Nur bei einem Push auf main (also nach dem Merge einer PR).
+  # Baut das Image, scannt es und veroeffentlicht es erst danach.
+  # ---------------------------------------------------------------------
+  build-and-scan:
+    name: Docker-Image bauen und scannen
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      # Die Registry verlangt Kleinbuchstaben im Image-Namen.
+      - name: Image-Namen festlegen
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Bei GitHub Container Registry anmelden
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker-Image lokal bauen (noch nicht veroeffentlichen)
+        run: docker build -t "$IMAGE" .
+
+      # Bricht ab bei kritischen oder hohen Schwachstellen, fuer die es
+      # bereits einen Patch gibt (Konfiguration wie im README-Beispiel).
+      - name: Image auf Schwachstellen scannen (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Docker-Image veroeffentlichen (erst nach bestandenem Scan)
+        run: docker push "$IMAGE"
+
+  # ---------------------------------------------------------------------
+  # JOB 3: Automatisches Deployment in die Staging-Umgebung.
+  # Der Job startet ein Kubernetes-Testcluster (kind) direkt im Runner,
+  # weil ein Cluster auf dem eigenen Rechner fuer GitHub nicht erreichbar
+  # ist. In der Fallstudie steht hier ein verwalteter Kubernetes-Dienst.
+  # ---------------------------------------------------------------------
+  deploy-staging:
+    name: Deployment nach Staging
+    needs: build-and-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Image-Namen festlegen
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: kubectl einrichten
+        uses: azure/setup-kubectl@v4
+
+      - name: Kubernetes-Testcluster starten (kind)
+        run: |
+          curl -sSLo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x ./kind
+          ./kind create cluster --name taskfluss --wait 120s
+
+      - name: Bei GitHub Container Registry anmelden
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Gepruefte Image-Version in das Cluster laden
+        run: |
+          docker pull "$IMAGE"
+          ./kind load docker-image "$IMAGE" --name taskfluss
+
+      - name: Nach Staging deployen (Rolling Update)
+        run: |
+          kubectl create namespace staging
+          sed "s|IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml > k8s/deployment-staging.yaml
+          kubectl apply -f k8s/deployment-staging.yaml -n staging
+          kubectl apply -f k8s/service.yaml -n staging
+          kubectl rollout status deployment/taskfluss-demo -n staging --timeout=180s
+
+      - name: Laufende Pods anzeigen (Nachweis)
+        run: kubectl get pods -n staging -o wide
+
+  # ---------------------------------------------------------------------
+  # JOB 4: Deployment in die Produktionsumgebung.
+  # Die Umgebung "production" ist im GitHub-Repo so eingerichtet, dass
+  # eine berechtigte Person zustimmen muss, bevor dieser Job startet
+  # (ANLEITUNG, Schritt 4).
+  # ---------------------------------------------------------------------
+  deploy-production:
+    name: Deployment nach Produktion (mit Genehmigung)
+    needs: deploy-staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Image-Namen festlegen
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: kubectl einrichten
+        uses: azure/setup-kubectl@v4
+
+      - name: Kubernetes-Testcluster starten (kind)
+        run: |
+          curl -sSLo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x ./kind
+          ./kind create cluster --name taskfluss --wait 120s
+
+      - name: Bei GitHub Container Registry anmelden
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Gepruefte Image-Version in das Cluster laden
+        run: |
+          docker pull "$IMAGE"
+          ./kind load docker-image "$IMAGE" --name taskfluss
+
+      - name: Nach Produktion deployen (Rolling Update)
+        run: |
+          kubectl create namespace production
+          sed "s|IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml > k8s/deployment-production.yaml
+          kubectl apply -f k8s/deployment-production.yaml -n production
+          kubectl apply -f k8s/service.yaml -n production
+          kubectl rollout status deployment/taskfluss-demo -n production --timeout=180s
+
+      - name: Laufende Pods anzeigen (Nachweis)
+        run: kubectl get pods -n production -o wide

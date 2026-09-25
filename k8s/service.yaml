@@ -1,0 +1,17 @@
+# Ein Service ist wie eine feste "Telefonnummer" fuer die App.
+# Die zwei Kopien (Replicas) aus deployment.yaml koennen jederzeit
+# neu gestartet werden und bekommen dabei neue interne Adressen -
+# der Service sorgt dafuer, dass man die App trotzdem immer unter
+# demselben Namen erreicht ("taskfluss-demo").
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskfluss-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: taskfluss-demo
+  ports:
+    - port: 80
+      targetPort: 3000

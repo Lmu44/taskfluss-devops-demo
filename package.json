@@ -1,0 +1,17 @@
+{
+  "name": "taskfluss-demo",
+  "version": "1.0.0",
+  "description": "Minimale Demo-Anwendung fuer den Proof of Concept der Fallstudie (TaskFluss)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "mocha test/**/*.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "mocha": "^10.4.0",
+    "supertest": "^7.0.0"
+  }
+}
