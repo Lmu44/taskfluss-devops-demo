@@ -4,7 +4,7 @@ const port = process.env.PORT || 3000;
 
 // Die Startseite von TaskFluss (Platzhalter fuer den Proof of Concept)
 app.get('/', (req, res) => {
-  res.json({ message: 'TaskFluss laeuft!', version: '1.0.0' });
+  res.json({ message: 'TaskFluss laeuft prima!', version: '1.0.0' });
 });
 
 // Der Health-Check-Endpunkt, den Kubernetes benutzt, um zu pruefen,
